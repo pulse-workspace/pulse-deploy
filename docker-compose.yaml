@@ -1,0 +1,131 @@
+# ==============================================================================
+# Docker Compose for Pulse & Infrastructure Stack
+#
+# Usage:
+#   1. Copy .env.example to .env:
+#      cp .env.example .env
+#   2. Start the stack:
+#      docker compose up -d
+# ==============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pulse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT:-32432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pulse-net
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: pulse-nats
+    restart: unless-stopped
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    ports:
+      - "${NATS_PORT:-32222}:4222"
+      - "${NATS_HTTP_PORT:-32822}:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pulse-net
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: pulse-rustfs
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY}
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_VOLUMES: /data
+    ports:
+      - "${STORAGE_PORT:-32900}:9000"
+      - "${STORAGE_CONSOLE_PORT:-32901}:9001"
+    volumes:
+      - rustfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pulse-net
+
+  pulse:
+    build:
+      context: ../pulse
+      dockerfile: ../pulse-deploy/Dockerfile
+    container_name: pulse
+    restart: unless-stopped
+    command: ["cell", "--config", "/configs/dev.yaml"]
+    environment:
+      PULSE_AUTO_MIGRATE: "1"
+    ports:
+      - "${PULSE_WS_PORT:-32001}:32001"       # WebSocket Gateway
+      - "${PULSE_ADMIN_PORT:-32003}:32003"    # Gateway Admin
+      - "${PULSE_API_PORT:-32011}:32011"      # REST API & Auth
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    networks:
+      - pulse-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pulse-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+    networks:
+      - pulse-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pulse-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - pulse-net
+
+volumes:
+  pg_data:
+  nats_data:
+  rustfs_data:
+  grafana_data:
+
+networks:
+  pulse-net:
+    driver: bridge
